@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# set-dns.sh — Lightweight, polite, bilingual DNS setter ✨
-# Works with Debian/Ubuntu, RHEL/CentOS/Rocky, Arch, NixOS (with systemd-resolved), etc.
+# set-dns.sh — Strict-only DNS setter, bilingual & graceful ✨
+# Debian/Ubuntu, RHEL/CentOS/Rocky, Arch, NixOS (common setups), etc.
 
 set -euo pipefail
 
@@ -10,18 +10,17 @@ TEST_DOMAIN="${TEST_DOMAIN:-unlock.isif.net}"
 EXPECT_IP="${EXPECT_IP:-1.1.1.1}"
 LANG_CHOICE="${LANG_CHOICE:-auto}"   # auto|zh|en
 FORCE_METHOD="${FORCE_METHOD:-auto}" # auto|resolved|nm|resolv
-DRY_RUN="${DRY_RUN:-0}"              # 1 to simulate
-QUIET="${QUIET:-0}"                  # 1 for minimal output
-ONLY_IPV4="${ONLY_IPV4:-0}"          # 1 to keep only IPv4 DNSes
-ONLY_IPV6="${ONLY_IPV6:-0}"          # 1 to keep only IPv6 DNSes
+DRY_RUN="${DRY_RUN:-0}"              # 1 simulate
+QUIET="${QUIET:-0}"                  # 1 minimal output
+ONLY_IPV4="${ONLY_IPV4:-0}"          # 1 IPv4-only
+ONLY_IPV6="${ONLY_IPV6:-0}"          # 1 IPv6-only
 
 # ===== i18n =====
 pick_lang() {
   case "$LANG_CHOICE" in
-    zh|ZH|cn|CN|zh_CN|zh_TW) echo zh ;;
-    en|EN|us|US|en_US|en_GB) echo en ;;
-    auto|Auto|AUTO|*)
-      case "${LANG:-}" in zh*|ZH*) echo zh ;; *) echo en ;; esac ;;
+    zh|ZH|cn|CN|zh_*) echo zh ;;
+    en|EN|us|US|en_*) echo en ;;
+    *) case "${LANG:-}" in zh*|ZH*) echo zh ;; *) echo en ;; esac ;;
   esac
 }
 LANG_USE="$(pick_lang)"
@@ -29,11 +28,11 @@ LANG_USE="$(pick_lang)"
 say_zh() {
   case "$1" in
     need_root) echo "请使用 root 运行（sudo $0）。";;
-    start) echo "开始设置 DNS（优雅模式）。";;
+    start) echo "开始设置 DNS（严格模式：只保留你指定的 DNS）。";;
     parsed_args) echo "参数就绪：准备出发 🚀";;
-    using_resolved) echo "检测到 systemd-resolved，采用 drop-in 方式设置。";;
-    using_nm) echo "检测到 NetworkManager，按活动连接设置手动 DNS。";;
-    using_resolv) echo "未检测到前两者，直接写入 /etc/resolv.conf（已备份）。";;
+    using_resolved) echo "检测到 systemd-resolved，已写入 drop-in（同时强制静态 resolv.conf）。";;
+    using_nm) echo "检测到 NetworkManager，已为活动连接设置手动 DNS（忽略自动）。";;
+    using_resolv) echo "直接写入 /etc/resolv.conf（已备份），只保留你的 DNS。";;
     backed_up) echo "已备份 /etc/resolv.conf ->";;
     flush_cache) echo "刷新 DNS 缓存中…";;
     testing) echo "正在解析域名：";;
@@ -56,7 +55,7 @@ say_zh() {
   --domain <域名>       测试解析的域名（默认: unlock.isif.net）
   --expect <IP>         期望命中的 IP（默认: 1.1.1.1）
   --lang <auto|zh|en>   语言（默认: auto）
-  --method <auto|resolved|nm|resolv>  强制方式（默认: auto）
+  --method <auto|resolved|nm|resolv>  首选方式（默认: auto）
   --only-ipv4           仅使用 IPv4 DNS
   --only-ipv6           仅使用 IPv6 DNS
   --dry-run             演练，不修改系统
@@ -68,21 +67,20 @@ EOF
       ;;
   esac
 }
-
 say_en() {
   case "$1" in
     need_root) echo "Please run as root (sudo $0).";;
-    start) echo "Starting DNS setup (polite mode).";;
+    start) echo "Starting DNS setup (STRICT mode: only your DNS).";;
     parsed_args) echo "Args parsed: ready to roll 🚀";;
-    using_resolved) echo "systemd-resolved detected, applying drop-in override.";;
-    using_nm) echo "NetworkManager detected, setting per active connection.";;
-    using_resolv) echo "Fallback: writing /etc/resolv.conf directly (backed up).";;
+    using_resolved) echo "systemd-resolved detected; drop-in applied and static resolv.conf enforced.";;
+    using_nm) echo "NetworkManager detected; active connections forced to manual DNS (ignore auto).";;
+    using_resolv) echo "Writing /etc/resolv.conf directly (backed up), only your DNS.";;
     backed_up) echo "Backed up /etc/resolv.conf ->";;
     flush_cache) echo "Flushing DNS caches…";;
     testing) echo "Querying domain:";;
     hits) echo "Answers:";;
     success) echo "Success ✅: expected IP matched";;
-    fail) echo "May not be applied yet ❗: expected IP not found. Retry later / check network manager.";;
+    fail) echo "May not be applied yet ❗: expected IP not found. Retry later / check NM.";;
     dryrun) echo "Dry-run mode (no changes). Previewing actions only:";;
     done) echo "All set. May your packets flow smoothly 🌊";;
     no_active_nm) echo "No active NetworkManager connections; skipping nm config.";;
@@ -99,7 +97,7 @@ Options:
   --domain <name>       Domain to test (default: unlock.isif.net)
   --expect <IP>         Expected IP (default: 1.1.1.1)
   --lang <auto|zh|en>   Language (default: auto)
-  --method <auto|resolved|nm|resolv>  Force method (default: auto)
+  --method <auto|resolved|nm|resolv>  Preferred method (default: auto)
   --only-ipv4           Use IPv4 DNS only
   --only-ipv6           Use IPv6 DNS only
   --dry-run             Simulate only, no system changes
@@ -111,13 +109,12 @@ EOF
       ;;
   esac
 }
-
 _() { if [ "${LANG_USE}" = zh ]; then say_zh "$@"; else say_en "$@"; fi; }
 log() { [ "$QUIET" -eq 1 ] || printf "[%s] %s\n" "$(date +'%F %T')" "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 is_active() { systemctl is-active --quiet "$1" 2>/dev/null; }
 
-# ===== arg parsing =====
+# ===== args =====
 RESTORE=0; INSTALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -141,6 +138,7 @@ done
 
 # ===== helpers =====
 IFS=',' read -r -a DNS_LIST <<<"$DNS_SERVERS_CSV"
+join_by() { local IFS="$1"; shift; echo "$*"; }
 
 filter_dns_family() {
   local out=()
@@ -151,8 +149,6 @@ filter_dns_family() {
   done
   DNS_LIST=("${out[@]}")
 }
-
-join_by() { local IFS="$1"; shift; echo "$*"; }
 
 backup_resolv_conf() {
   local ts="/etc/resolv.conf.bak.$(date +%Y%m%d%H%M%S)"
@@ -171,24 +167,24 @@ restore_latest_resolv() {
   fi
 }
 
-write_resolv_conf() {
-  # Handle immutable / symlink
+enforce_static_resolv_conf() {
+  # 强制把 /etc/resolv.conf 变为“只含你给的 DNS”的静态文件
   if have chattr; then [ "$DRY_RUN" -eq 1 ] || chattr -i /etc/resolv.conf 2>/dev/null || true; fi
-  [ -L /etc/resolv.conf ] && [ "$DRY_RUN" -eq 0 ] && rm -f /etc/resolv.conf
-  [ "$DRY_RUN" -eq 0 ] || return 0
-
-  {
-    echo "# Generated by set-dns.sh @ $(date)"
-    for ns in "${DNS_LIST[@]}"; do echo "nameserver $ns"; done
-    echo "options timeout:2 attempts:2"
-  } >/etc/resolv.conf
+  [ "$DRY_RUN" -eq 1 ] || { [ -L /etc/resolv.conf ] && rm -f /etc/resolv.conf || true; }
+  if [ "$DRY_RUN" -eq 0 ]; then
+    {
+      echo "# Generated by set-dns.sh @ $(date)"
+      for ns in "${DNS_LIST[@]}"; do echo "nameserver $ns"; done
+      echo "options timeout:2 attempts:2"
+    } >/etc/resolv.conf
+  fi
   log "$(_ using_resolv)"
 }
 
 set_dns_systemd_resolved() {
+  # 写入 drop-in：避免 fallback，同时以静态 resolv.conf 为准
   local dir="/etc/systemd/resolved.conf.d"
-  local dns_space
-  dns_space="$(join_by ' ' "${DNS_LIST[@]}")"
+  local dns_space; dns_space="$(join_by ' ' "${DNS_LIST[@]}")"
   [ "$DRY_RUN" -eq 1 ] || mkdir -p "$dir"
   if [ "$DRY_RUN" -eq 0 ]; then
     {
@@ -196,12 +192,12 @@ set_dns_systemd_resolved() {
       echo "DNS=$dns_space"
       echo "FallbackDNS="
     } >"$dir/99-override.conf"
-    systemctl restart systemd-resolved
+    systemctl restart systemd-resolved || true
   fi
   log "$(_ using_resolved)"
 }
 
-set_dns_nmcli() {
+set_dns_nmcli_strict() {
   local dns4=() dns6=()
   for ns in "${DNS_LIST[@]}"; do
     case "$ns" in *:*) dns6+=("$ns");; *) dns4+=("$ns");; esac
@@ -218,11 +214,13 @@ set_dns_nmcli() {
     if [ "$DRY_RUN" -eq 0 ]; then
       nmcli connection modify "$name" ipv4.ignore-auto-dns yes || true
       nmcli connection modify "$name" ipv6.ignore-auto-dns yes || true
-      [ -n "$dns4_csv" ] && nmcli connection modify "$name" ipv4.dns "$dns4_csv" || true
-      [ -n "$dns6_csv" ] && nmcli connection modify "$name" ipv6.dns "$dns6_csv" || true
+      nmcli connection modify "$name" ipv4.dns-search "" || true
+      nmcli connection modify "$name" ipv6.dns-search "" || true
+      nmcli connection modify "$name" ipv4.dns "$dns4_csv" || true
+      nmcli connection modify "$name" ipv6.dns "$dns6_csv" || true
       nmcli connection up "$name" >/dev/null || true
     fi
-    log "nm: $name -> dns4=[${dns4_csv:-∅}] dns6=[${dns6_csv:-∅}]"
+    log "nm: $name -> dns4=[${dns4_csv:-∅}] dns6=[${dns6_csv:-∅}] (ignore-auto-dns)"
   done <<<"$active"
   log "$(_ using_nm)"
 }
@@ -254,6 +252,7 @@ choose_method() {
   case "$FORCE_METHOD" in
     resolved|nm|resolv) echo "$FORCE_METHOD"; return;;
     auto|*)
+      # 仍会执行 nm/resolved 的“内部设置”，但最终统一强制写静态 resolv.conf
       if have systemctl && is_active systemd-resolved && have resolvectl; then
         echo resolved
       elif have nmcli && have systemctl && is_active NetworkManager; then
@@ -283,21 +282,24 @@ main() {
   ensure_root
   filter_dns_family
 
-  [ "$RESTORE" -eq 1 ] && { restore_latest_resolv; exit 0; }
-  [ "$INSTALL" -eq 1 ] && { install_self; exit 0; }
+  if [ "${1-}" = "--help" ] || [ "${1-}" = "-h" ]; then _ usage; exit 0; fi
+  if [ "${RESTORE}" -eq 1 ]; then restore_latest_resolv; exit 0; fi
+  if [ "${INSTALL}" -eq 1 ]; then install_self; exit 0; fi
 
   [ "$QUIET" -eq 1 ] || log "$(_ start)"
   [ "$DRY_RUN" -eq 1 ] && log "$(_ dryrun)"
   log "$(_ parsed_args) DNS=[${DNS_LIST[*]}] domain=$TEST_DOMAIN expect=$EXPECT_IP lang=$LANG_USE method=$FORCE_METHOD"
 
-  local method
-  method="$(choose_method)"
-
+  local method; method="$(choose_method)"
+  backup_resolv_conf
   case "$method" in
-    resolved) backup_resolv_conf; set_dns_systemd_resolved ;;
-    nm)       backup_resolv_conf; set_dns_nmcli ;;
-    resolv)   backup_resolv_conf; write_resolv_conf ;;
+    resolved) set_dns_systemd_resolved ;;
+    nm)       set_dns_nmcli_strict ;;
+    resolv)   : ;;
   esac
+
+  # 统一强制静态 resolv.conf（只保留你的 DNS）
+  enforce_static_resolv_conf
 
   flush_dns_cache
   sleep 0.5
