@@ -51,7 +51,7 @@ say_zh() {
   sudo ./set-dns.sh [选项]
 
 选项：
-  --dns <CSV>           要设置的 DNS，逗号分隔（默认: 1.1.1.1,2606:4700:4700::1111）
+  --dns <CSV>           要设置的 DNS，逗号分隔（默认: 151.240.12.10）
   --domain <域名>       测试解析的域名（默认: unlock.isif.net）
   --expect <IP>         期望命中的 IP（默认: 1.1.1.1）
   --lang <auto|zh|en>   语言（默认: auto）
@@ -93,7 +93,7 @@ Usage:
   sudo ./set-dns.sh [options]
 
 Options:
-  --dns <CSV>           DNS servers (comma-separated), default: 1.1.1.1,2606:4700:4700::1111
+  --dns <CSV>           DNS servers (comma-separated), default: 151.240.12.10
   --domain <name>       Domain to test (default: unlock.isif.net)
   --expect <IP>         Expected IP (default: 1.1.1.1)
   --lang <auto|zh|en>   Language (default: auto)
@@ -113,16 +113,19 @@ _() { if [ "${LANG_USE}" = zh ]; then say_zh "$@"; else say_en "$@"; fi; }
 log() { [ "$QUIET" -eq 1 ] || printf "[%s] %s\n" "$(date +'%F %T')" "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 is_active() { systemctl is-active --quiet "$1" 2>/dev/null; }
+need_arg() {
+  [ "$#" -ge 2 ] || { echo "Missing value for $1" >&2; _ usage; exit 2; }
+}
 
 # ===== args =====
 RESTORE=0; INSTALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --dns) DNS_SERVERS_CSV="$2"; shift 2;;
-    --domain) TEST_DOMAIN="$2"; shift 2;;
-    --expect) EXPECT_IP="$2"; shift 2;;
-    --lang) LANG_CHOICE="$2"; LANG_USE="$(pick_lang)"; shift 2;;
-    --method) FORCE_METHOD="$2"; shift 2;;
+    --dns) need_arg "$@"; DNS_SERVERS_CSV="$2"; shift 2;;
+    --domain) need_arg "$@"; TEST_DOMAIN="$2"; shift 2;;
+    --expect) need_arg "$@"; EXPECT_IP="$2"; shift 2;;
+    --lang) need_arg "$@"; LANG_CHOICE="$2"; LANG_USE="$(pick_lang)"; shift 2;;
+    --method) need_arg "$@"; FORCE_METHOD="$2"; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
     --quiet) QUIET=1; shift;;
     --only-ipv4) ONLY_IPV4=1; shift;;
@@ -135,10 +138,34 @@ while [ $# -gt 0 ]; do
 done
 [ "$ONLY_IPV4" -eq 1 ] && ONLY_IPV6=0
 [ "$ONLY_IPV6" -eq 1 ] && ONLY_IPV4=0
+case "$FORCE_METHOD" in auto|resolved|nm|resolv) ;; *) echo "Invalid --method: $FORCE_METHOD" >&2; exit 2;; esac
+case "$LANG_USE" in zh|en) ;; *) echo "Invalid --lang: $LANG_CHOICE" >&2; exit 2;; esac
 
 # ===== helpers =====
 IFS=',' read -r -a DNS_LIST <<<"$DNS_SERVERS_CSV"
 join_by() { local IFS="$1"; shift; echo "$*"; }
+
+is_ipv4() {
+  local part
+  [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -r -a _ipv4_parts <<<"$1"
+  [ "${#_ipv4_parts[@]}" -eq 4 ] || return 1
+  for part in "${_ipv4_parts[@]}"; do
+    [[ "$part" =~ ^[0-9]{1,3}$ ]] || return 1
+    [ "$((10#$part))" -le 255 ] || return 1
+  done
+}
+
+is_ipv6() { [[ "$1" == *:* && "$1" =~ [0-9A-Fa-f] && "$1" =~ ^[0-9A-Fa-f:.]+$ ]]; }
+
+validate_dns_list() {
+  local ns
+  [ "${#DNS_LIST[@]}" -gt 0 ] || { echo "DNS list is empty" >&2; exit 2; }
+  for ns in "${DNS_LIST[@]}"; do
+    [[ -n "$ns" && "$ns" != *[[:space:]]* ]] || { echo "Invalid DNS address: $ns" >&2; exit 2; }
+    is_ipv4 "$ns" || is_ipv6 "$ns" || { echo "Invalid DNS address: $ns" >&2; exit 2; }
+  done
+}
 
 filter_dns_family() {
   local out=()
@@ -148,6 +175,7 @@ filter_dns_family() {
     if [ "$ONLY_IPV4" -eq 0 ] && [ "$ONLY_IPV6" -eq 0 ]; then out+=("$ns"); fi
   done
   DNS_LIST=("${out[@]}")
+  [ "${#DNS_LIST[@]}" -gt 0 ] || { echo "No DNS server matches the selected IP family" >&2; exit 2; }
 }
 
 backup_resolv_conf() {
@@ -235,6 +263,7 @@ flush_dns_cache() {
 }
 
 test_resolution() {
+  have getent || { echo "getent is required for the resolution check" >&2; return 1; }
   log "$(_ testing) $TEST_DOMAIN"
   local hits
   hits="$(getent ahosts "$TEST_DOMAIN" | awk '{print $1}' | sort -u || true)"
@@ -280,11 +309,10 @@ install_self() {
 
 main() {
   ensure_root
-  filter_dns_family
-
-  if [ "${1-}" = "--help" ] || [ "${1-}" = "-h" ]; then _ usage; exit 0; fi
   if [ "${RESTORE}" -eq 1 ]; then restore_latest_resolv; exit 0; fi
   if [ "${INSTALL}" -eq 1 ]; then install_self; exit 0; fi
+  filter_dns_family
+  validate_dns_list
 
   [ "$QUIET" -eq 1 ] || log "$(_ start)"
   [ "$DRY_RUN" -eq 1 ] && log "$(_ dryrun)"
